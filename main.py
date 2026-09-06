@@ -1,8 +1,7 @@
 """
-YouTube / TikTok / Instagram -> MP3 converter (GUI).
+YouTube / TikTok / Instagram converter (GUI).
 
-yt-dlp natively supports TikTok and Instagram URLs (public posts/reels),
-so no extra dependency is needed beyond what YouTube already required.
+Supports MP3, WAV, FLAC, M4A, Opus, MP4, WEBM, and MKV.
 
 Requires:
   pip install yt-dlp imageio-ffmpeg
@@ -16,7 +15,7 @@ import shutil
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import filedialog, messagebox, ttk
 
 import yt_dlp
 
@@ -34,17 +33,30 @@ SUPPORTED_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# label -> (kind, extension, yt-dlp preferredcodec or None for video)
+# kind is "audio" or "video"
+FORMATS: dict[str, tuple[str, str, str | None]] = {
+    "MP3 (audio)": ("audio", "mp3", "mp3"),
+    "WAV (audio)": ("audio", "wav", "wav"),
+    "FLAC (audio)": ("audio", "flac", "flac"),
+    "M4A (audio)": ("audio", "m4a", "m4a"),
+    "Opus (audio)": ("audio", "opus", "opus"),
+    "MP4 (video)": ("video", "mp4", None),
+    "WEBM (video)": ("video", "webm", None),
+    "MKV (video)": ("video", "mkv", None),
+}
+
 # ---------------------------------------------------------------------------
 # Night sky / dark-mode color palette
 # ---------------------------------------------------------------------------
-BG_DEEP = "#0b0b1f"        # deep midnight indigo, main background
-BG_PANEL = "#12123a"       # slightly lighter panel background
-STAR_COLOR = "#1c1c4a"     # background glyphs - subtle, close to BG_DEEP
-ACCENT = "#c9b8ff"         # soft moonlight lavender accent
-ACCENT_DARK = "#a68fe0"    # pressed/darker accent
-TEXT_MAIN = "#f2f0ff"      # near-white with a cool tint
-TEXT_MUTED = "#8b87b3"     # muted periwinkle-gray for secondary text
-ENTRY_BG = "#181840"       # input field background
+BG_DEEP = "#0b0b1f"
+BG_PANEL = "#12123a"
+STAR_COLOR = "#1c1c4a"
+ACCENT = "#c9b8ff"
+ACCENT_DARK = "#a68fe0"
+TEXT_MAIN = "#f2f0ff"
+TEXT_MUTED = "#8b87b3"
+ENTRY_BG = "#181840"
 BORDER = "#2c2c5c"
 
 STAR_GLYPHS = ["\u2727\u02d6\u00b0.", "\u23fe\u22c6.\u02da", "\u27e1"]
@@ -66,7 +78,50 @@ def find_ffmpeg() -> str | None:
         return None
 
 
-def download_as_mp3(url: str, output_dir: Path = OUTPUT_DIR) -> Path:
+def build_ydl_opts(format_label: str, output_dir: Path, ffmpeg: str) -> dict:
+    kind, ext, codec = FORMATS[format_label]
+    outtmpl = str(output_dir / "%(title)s.%(ext)s")
+
+    if kind == "audio":
+        return {
+            "format": "bestaudio/best",
+            "outtmpl": outtmpl,
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "ffmpeg_location": ffmpeg,
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": codec,
+                    "preferredquality": "192",
+                }
+            ],
+        }
+
+    # Video: prefer best merged stream, remux/convert to chosen container
+    if ext == "mp4":
+        fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+        merge = "mp4"
+    elif ext == "webm":
+        fmt = "bestvideo[ext=webm]+bestaudio[ext=webm]/bestvideo+bestaudio/best"
+        merge = "webm"
+    else:  # mkv
+        fmt = "bestvideo+bestaudio/best"
+        merge = "mkv"
+
+    return {
+        "format": fmt,
+        "outtmpl": outtmpl,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "ffmpeg_location": ffmpeg,
+        "merge_output_format": merge,
+    }
+
+
+def download_media(url: str, format_label: str, output_dir: Path = OUTPUT_DIR) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     ffmpeg = find_ffmpeg()
@@ -76,21 +131,8 @@ def download_as_mp3(url: str, output_dir: Path = OUTPUT_DIR) -> Path:
             "or: pip install imageio-ffmpeg"
         )
 
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": str(output_dir / "%(title)s.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "ffmpeg_location": ffmpeg,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ],
-    }
+    kind, ext, _codec = FORMATS[format_label]
+    ydl_opts = build_ydl_opts(format_label, output_dir, ffmpeg)
 
     if COOKIES_FROM_BROWSER:
         ydl_opts["cookiesfrombrowser"] = (COOKIES_FROM_BROWSER,)
@@ -98,9 +140,9 @@ def download_as_mp3(url: str, output_dir: Path = OUTPUT_DIR) -> Path:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            title = info.get("title") or "audio"
+            title = info.get("title") or "media"
             filename = ydl.prepare_filename(info)
-            mp3_path = Path(filename).with_suffix(".mp3")
+            result_path = Path(filename).with_suffix(f".{ext}")
     except yt_dlp.utils.DownloadError as e:
         message = str(e)
         if "login" in message.lower() or "rate-limit" in message.lower():
@@ -112,27 +154,31 @@ def download_as_mp3(url: str, output_dir: Path = OUTPUT_DIR) -> Path:
             ) from e
         raise
 
-    if not mp3_path.exists():
-        mp3s = sorted(output_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
-        if not mp3s:
-            raise FileNotFoundError(f"MP3 was not created for: {title}")
-        mp3_path = mp3s[-1]
+    if not result_path.exists():
+        matches = sorted(output_dir.glob(f"*.{ext}"), key=lambda p: p.stat().st_mtime)
+        if not matches:
+            # Video merges sometimes keep a different intermediate extension
+            recent = sorted(output_dir.iterdir(), key=lambda p: p.stat().st_mtime)
+            recent = [p for p in recent if p.is_file()]
+            if recent:
+                return recent[-1]
+            raise FileNotFoundError(f"{ext.upper()} was not created for: {title}")
+        result_path = matches[-1]
 
-    return mp3_path
+    return result_path
 
 
 class App(tk.Tk):
     WIDTH = 560
-    HEIGHT = 320
+    HEIGHT = 460
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Video -> MP3")
+        self.title("Video Converter")
         self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
         self.resizable(False, False)
         self.configure(bg=BG_DEEP)
 
-        # ---- background canvas with giant faint star/moon glyphs --------
         self.bg_canvas = tk.Canvas(
             self,
             width=self.WIDTH,
@@ -144,12 +190,9 @@ class App(tk.Tk):
         self.bg_canvas.place(x=0, y=0, relwidth=1, relheight=1)
         self._draw_background_stars()
 
-        # ---- foreground content, placed on top of the canvas ------------
-        pad = {"padx": 24, "pady": 6}
-
         title_lbl = tk.Label(
             self,
-            text="Video \u2192 MP3",
+            text="Video Converter",
             font=("Helvetica", 20, "bold"),
             fg=TEXT_MAIN,
             bg=BG_DEEP,
@@ -183,6 +226,74 @@ class App(tk.Tk):
         entry.focus_set()
         entry.bind("<Return>", lambda _e: self.start_convert())
 
+        format_lbl = tk.Label(
+            self,
+            text="Format",
+            font=("Helvetica", 11),
+            fg=TEXT_MUTED,
+            bg=BG_DEEP,
+        )
+        self.bg_canvas.create_window(24, 142, anchor="nw", window=format_lbl)
+
+        self.format_var = tk.StringVar(value="MP3 (audio)")
+        self._style_combobox()
+        format_box = ttk.Combobox(
+            self,
+            textvariable=self.format_var,
+            values=list(FORMATS.keys()),
+            state="readonly",
+            style="Dark.TCombobox",
+            font=("Helvetica", 12),
+            width=22,
+        )
+        self.bg_canvas.create_window(24, 168, anchor="nw", window=format_box, height=32)
+        format_box.bind("<<ComboboxSelected>>", self._on_format_change)
+
+        save_lbl = tk.Label(
+            self,
+            text="Save to",
+            font=("Helvetica", 11),
+            fg=TEXT_MUTED,
+            bg=BG_DEEP,
+        )
+        self.bg_canvas.create_window(24, 214, anchor="nw", window=save_lbl)
+
+        self.save_dir_var = tk.StringVar(value=str(OUTPUT_DIR))
+        save_entry = tk.Entry(
+            self,
+            textvariable=self.save_dir_var,
+            font=("Helvetica", 11),
+            bg=ENTRY_BG,
+            fg=TEXT_MAIN,
+            insertbackground=ACCENT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            width=32,
+        )
+        self.bg_canvas.create_window(24, 240, anchor="nw", window=save_entry, height=34)
+
+        browse_btn = tk.Button(
+            self,
+            text="Browse…",
+            font=("Helvetica", 11),
+            bg=ENTRY_BG,
+            fg=ACCENT,
+            activebackground=BORDER,
+            activeforeground=TEXT_MAIN,
+            relief="flat",
+            cursor="hand2",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            command=self.browse_save_dir,
+        )
+        self.bg_canvas.create_window(
+            420, 240, anchor="nw", window=browse_btn, height=34, width=100
+        )
+        self.browse_btn = browse_btn
+
         self.convert_btn = tk.Button(
             self,
             text="Convert to MP3",
@@ -196,9 +307,11 @@ class App(tk.Tk):
             bd=0,
             command=self.start_convert,
         )
-        self.bg_canvas.create_window(24, 142, anchor="nw", window=self.convert_btn, height=38, width=160)
+        self.bg_canvas.create_window(
+            24, 296, anchor="nw", window=self.convert_btn, height=38, width=180
+        )
 
-        self.status_var = tk.StringVar(value=f"Files save to: {OUTPUT_DIR}")
+        self.status_var = tk.StringVar(value="Ready")
         status_lbl = tk.Label(
             self,
             textvariable=self.status_var,
@@ -208,17 +321,56 @@ class App(tk.Tk):
             wraplength=self.WIDTH - 48,
             justify="left",
         )
-        self.bg_canvas.create_window(24, 200, anchor="nw", window=status_lbl)
+        self.bg_canvas.create_window(24, 356, anchor="nw", window=status_lbl)
 
         self._busy = False
 
-    # ------------------------------------------------------------------
+    def _style_combobox(self) -> None:
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "Dark.TCombobox",
+            fieldbackground=ENTRY_BG,
+            background=ENTRY_BG,
+            foreground=TEXT_MAIN,
+            arrowcolor=ACCENT,
+            bordercolor=BORDER,
+            lightcolor=BORDER,
+            darkcolor=BORDER,
+            insertcolor=ACCENT,
+            selectbackground=ACCENT_DARK,
+            selectforeground=TEXT_MAIN,
+            padding=6,
+        )
+        style.map(
+            "Dark.TCombobox",
+            fieldbackground=[("readonly", ENTRY_BG)],
+            foreground=[("readonly", TEXT_MAIN)],
+            background=[("readonly", ENTRY_BG)],
+        )
+
+    def _on_format_change(self, _event=None) -> None:
+        label = self.format_var.get()
+        _kind, ext, _codec = FORMATS[label]
+        self.convert_btn.configure(text=f"Convert to {ext.upper()}")
+
+    def browse_save_dir(self) -> None:
+        current = self.save_dir_var.get().strip() or str(OUTPUT_DIR)
+        chosen = filedialog.askdirectory(
+            title="Choose save folder",
+            initialdir=current if Path(current).is_dir() else str(Path.home()),
+        )
+        if chosen:
+            self.save_dir_var.set(chosen)
+
     def _draw_background_stars(self) -> None:
-        """Scatter large, low-contrast star/moon glyphs behind the UI."""
         placements = [
             (self.WIDTH - 70, 40, 46),
-            (60, 260, 60),
-            (self.WIDTH - 110, 230, 70),
+            (60, 380, 60),
+            (self.WIDTH - 110, 350, 70),
             (self.WIDTH // 2 + 50, 130, 80),
             (10, 95, 44),
         ]
@@ -233,12 +385,13 @@ class App(tk.Tk):
                 fill=STAR_COLOR,
                 anchor="center",
             )
-        # keep decorative glyphs behind everything drawn afterwards
         self.bg_canvas.tag_lower("all")
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
-        self.convert_btn.configure(state="disabled" if busy else "normal")
+        state = "disabled" if busy else "normal"
+        self.convert_btn.configure(state=state)
+        self.browse_btn.configure(state=state)
 
     def start_convert(self) -> None:
         if self._busy:
@@ -255,13 +408,32 @@ class App(tk.Tk):
             )
             return
 
-        self.set_busy(True)
-        self.status_var.set("Downloading and converting...")
-        threading.Thread(target=self._convert_worker, args=(url,), daemon=True).start()
+        format_label = self.format_var.get()
+        if format_label not in FORMATS:
+            messagebox.showerror("Invalid format", "Pick a format from the list.")
+            return
 
-    def _convert_worker(self, url: str) -> None:
+        save_dir = Path(self.save_dir_var.get().strip() or str(OUTPUT_DIR)).expanduser()
         try:
-            path = download_as_mp3(url)
+            save_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror("Invalid folder", f"Can't use that save folder:\n{e}")
+            return
+
+        _kind, ext, _codec = FORMATS[format_label]
+        self.set_busy(True)
+        self.status_var.set(f"Downloading and converting to {ext.upper()}...")
+        threading.Thread(
+            target=self._convert_worker,
+            args=(url, format_label, save_dir),
+            daemon=True,
+        ).start()
+
+    def _convert_worker(
+        self, url: str, format_label: str, output_dir: Path
+    ) -> None:
+        try:
+            path = download_media(url, format_label, output_dir)
         except Exception as e:
             self.after(0, self._on_error, str(e))
             return
@@ -270,7 +442,7 @@ class App(tk.Tk):
     def _on_success(self, path: Path) -> None:
         self.set_busy(False)
         self.status_var.set(f"Saved: {path.name}")
-        messagebox.showinfo("Done", f"MP3 saved to:\n{path}")
+        messagebox.showinfo("Done", f"Saved to:\n{path}")
 
     def _on_error(self, message: str) -> None:
         self.set_busy(False)
