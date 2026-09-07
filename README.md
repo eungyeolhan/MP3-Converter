@@ -1,5 +1,5 @@
 # Video File Converter
-An easy-to-us converter to turn any video on YouTube, Instagram, and Tiktok into an audio/video file!
+An easy-to-use converter to turn any video on YouTube, Instagram, and Tiktok into an audio/video file!
 
 Simply go to the video you want to convert, click share and copy the link.
 Run main.py AFTER checking all necessary packages are downloaded.
